@@ -99,8 +99,6 @@ async function fetchFromS3(bucket, key) {
 async function loadCuisineMap() {
   try {
     let cuisinesData;
-    
-    // Try S3 first if bucket is configured
     if (CONFIG.S3_BUCKET) {
       try {
         console.log('📖 Loading cuisines data from S3...');
@@ -135,8 +133,8 @@ async function loadCuisineMap() {
 }
 
 // Global variables for loaded data
-let cuisineMap = {};
-let imageEmbeddings = [];
+let cuisineMap = null;
+let imageEmbeddings = null;
 
 /**
  * Load precomputed embeddings from S3 or local file
@@ -394,8 +392,6 @@ function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbe
     }
   }
 
-  console.log('bestMatch', bestMatch.name);
-
   const result = {
     bestMatch,
     cosineScore: bestCosineScore,
@@ -584,8 +580,6 @@ exports.handler = async (event, context) => {
   
   try {
     // Load data from S3 or local files
-    console.log('📖 Loading data files...');
-
     if(!cuisineMap || !imageEmbeddings) {
       [cuisineMap, imageEmbeddings] = await Promise.all([
         loadCuisineMap(),
@@ -647,7 +641,8 @@ exports.handler = async (event, context) => {
       const totalBatches = Math.ceil(mealsToProcess.length / batchSize);
       
       console.log(`🔄 Processing batch ${batchNumber}/${totalBatches} (${batch.length} meals)`);
-      
+      console.log('imageEmbeddings', imageEmbeddings.length);
+      console.log('cuisineMap length', Object.entries(cuisineMap).length);
       const batchResults = await processMealBatch(batch, imageEmbeddings);
       allResults.push(...batchResults);
       processedCount += batch.length;
