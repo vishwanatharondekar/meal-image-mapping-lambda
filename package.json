@@ -1,0 +1,37 @@
+{
+  "name": "meal-image-mapping-lambda",
+  "version": "1.0.0",
+  "description": "AWS Lambda function for meal-image mapping with precomputed embeddings",
+  "main": "index.js",
+  "scripts": {
+    "deploy": "node deploy.js",
+    "test": "node test.js",
+    "test-modes": "node test-modes.js",
+    "test-s3": "node test-s3-integration.js",
+    "example": "node example-usage.js",
+    "run-local": "node run-local.js",
+    "run-local:mock": "node run-local.js --mock",
+    "run-local:real": "node run-local.js --real",
+    "run-local:request": "node run-local.js --request",
+    "create-env": "node run-local.js --create-env",
+    "package": "zip -r meal-image-mapping.zip . -x '*.git*' 'node_modules/*' 'node_modules/.cache/*' '*.log' 'test.js' 'test-modes.js' 'test-s3-integration.js' 'example-usage.js' 'deploy.js' 'run-local.js' 'package-lock.json'",
+    "install-deps": "npm install --production"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.450.0",
+    "firebase": "^10.7.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "aws-lambda",
+    "meal-planning",
+    "image-mapping",
+    "embeddings",
+    "firestore"
+  ],
+  "author": "Weekly Food Planner",
+  "license": "MIT"
+}
