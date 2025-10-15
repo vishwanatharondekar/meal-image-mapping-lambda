@@ -1,0 +1,50 @@
+name: Deploy Lambda Function
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION || 'us-west-2' }}
+        
+    - name: Set environment variables
+      run: |
+        echo "FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}" >> $GITHUB_ENV
+        echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+        echo "KHANA_KYA_BANAU_S3_BUCKET=${{ secrets.KHANA_KYA_BANAU_S3_BUCKET }}" >> $GITHUB_ENV
+        echo "COSINE_SIMILARITY_THRESHOLD=${{ secrets.COSINE_SIMILARITY_THRESHOLD || '0.7' }}" >> $GITHUB_ENV
+        echo "TEXT_SIMILARITY_THRESHOLD=${{ secrets.TEXT_SIMILARITY_THRESHOLD || '0.6' }}" >> $GITHUB_ENV
+        echo "MAX_MEALS_PER_BATCH=${{ secrets.MAX_MEALS_PER_BATCH || '50' }}" >> $GITHUB_ENV
+        
+    - name: Deploy Lambda function
+      run: node deploy.js
+      
+    - name: Deployment summary
+      run: |
+        echo "✅ Lambda function deployed successfully!"
+        echo "Function: meal-image-mapper"
+        echo "Region: ${{ secrets.AWS_REGION || 'us-west-2' }}"
+        echo "Runtime: nodejs22.x"
+        echo "Memory: 1024MB"
