@@ -174,3 +174,5 @@ users-export-*.csv
 .DS_Store
 
 *.zip
+
+data/

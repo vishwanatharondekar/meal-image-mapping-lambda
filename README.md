@@ -7,6 +7,9 @@ A self-contained AWS Lambda function that generates mappings from meal names to 
 - **Dual Processing Modes**: 
   - **Fetch Mode**: Automatically fetches unmapped meals from Firestore (default)
   - **Request Mode**: Processes specific meal names provided in request body
+- **Flexible Data Storage**: 
+  - **Local Mode**: Uses local files for embeddings and cuisines data (set `LOCAL_MODE=true`)
+  - **S3 Mode**: Uses S3 bucket for data storage with local fallback (default)
 - **Precomputed Embeddings**: Uses local embeddings stored within the Lambda package
 - **Dual Similarity Matching**: Combines cosine similarity and text-based similarity for better accuracy
 - **Vegetarian Fail-Safe**: Ensures vegetarian meals are never mapped to non-vegetarian images
@@ -65,9 +68,15 @@ export FIREBASE_PROJECT_ID="your-firebase-project-id"
 # OpenAI Configuration
 export OPENAI_API_KEY="sk-your-openai-api-key"
 
+# Local Mode Configuration
+export LOCAL_MODE="true"                  # Set to 'true' to use local files instead of S3
+
+# S3 Configuration (required when LOCAL_MODE=false)
+export KHANA_KYA_BANAU_S3_BUCKET="your-s3-bucket-name"
+
 # Optional Configuration (with defaults)
-export COSINE_SIMILARITY_THRESHOLD="0.7"  # Default: 0.7
-export TEXT_SIMILARITY_THRESHOLD="0.6"    # Default: 0.6
+export COSINE_SIMILARITY_THRESHOLD="0.2"  # Default: 0.2
+export TEXT_SIMILARITY_THRESHOLD="0.2"    # Default: 0.2
 export MAX_MEALS_PER_BATCH="50"           # Default: 50
 export AWS_REGION="us-east-1"             # Default: us-east-1
 ```
@@ -76,6 +85,7 @@ export AWS_REGION="us-east-1"             # Default: us-east-1
 1. Go to Firebase Console → Project Settings
 2. Copy your Project ID
 3. Ensure your Firestore database has the required collections: `meals` and `mealImageMappings`
+   - Note: `mealImageMappings` documents use meal names as document IDs to ensure uniqueness
 
 ## Installation
 
@@ -152,9 +162,29 @@ aws lambda update-function-configuration \
 - **Runtime**: Node.js 18.x
 - **Handler**: index.handler
 
+### Data Storage Modes
+
+#### Local Mode (`LOCAL_MODE=true`)
+- Uses local files in the `data/` directory
+- No S3 dependencies required
+- Faster startup time
+- Ideal for development and testing
+- Files required:
+  - `data/image-embeddings.json`
+  - `data/cuisines.json`
+
+#### S3 Mode (`LOCAL_MODE=false` or unset)
+- Uses S3 bucket for data storage only
+- **No fallback to local files** - fails fast if S3 is unavailable
+- Requires `KHANA_KYA_BANAU_S3_BUCKET` environment variable
+- Ideal for production deployments
+- S3 keys:
+  - `data/image-embeddings.json`
+  - `data/cuisines.json`
+
 ### Similarity Thresholds
-- **Cosine Similarity**: 0.7 (configurable via environment variable)
-- **Text Similarity**: 0.6 (configurable via environment variable)
+- **Cosine Similarity**: 0.2 (configurable via environment variable)
+- **Text Similarity**: 0.2 (configurable via environment variable)
 
 ### Batch Processing
 - **Max Meals per Batch**: 50 (configurable via environment variable)

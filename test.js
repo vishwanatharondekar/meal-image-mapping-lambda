@@ -240,15 +240,17 @@ async function testMealBatchProcessing() {
 function testVegetarianDetection() {
   console.log('🧪 Testing vegetarian detection...');
   
-  const { detectMealVegetarian, detectImageVegetarian } = require('./vegetarian-detection');
+  const { detectMealVegetarian, detectImageNonVegetarian } = require('./vegetarian-detection');
   
   // Test meal detection
   const vegetarianMeal = detectMealVegetarian('Vegetable Curry', 'Mixed vegetables in curry sauce');
   const nonVegetarianMeal = detectMealVegetarian('Chicken Biryani', 'Aromatic rice dish with chicken');
   
   // Test image detection
-  const vegetarianImage = detectImageVegetarian('https://example.com/vegetable-curry.jpg', 'Vegetable Curry Image');
-  const nonVegetarianImage = detectImageVegetarian('https://example.com/chicken-biryani.jpg', 'Chicken Biryani Image');
+  const vegetarianImageNonVeg = detectImageNonVegetarian('https://example.com/vegetable-curry.jpg', 'Vegetable Curry Image');
+  const nonVegetarianImageNonVeg = detectImageNonVegetarian('https://example.com/chicken-biryani.jpg', 'Chicken Biryani Image');
+  const vegetarianImage = !vegetarianImageNonVeg; // Convert to vegetarian boolean
+  const nonVegetarianImage = !nonVegetarianImageNonVeg; // Convert to vegetarian boolean
   
   console.log(`✅ Vegetarian meal detected: ${vegetarianMeal} (expected: true)`);
   console.log(`✅ Non-vegetarian meal detected: ${nonVegetarianMeal} (expected: false)`);

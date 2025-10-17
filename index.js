@@ -12,18 +12,19 @@
  * Environment Variables Required:
  * - FIREBASE_PROJECT_ID: Firebase project ID
  * - OPENAI_API_KEY: OpenAI API key for generating embeddings
- * - KHANA_KYA_BANAU_S3_BUCKET: S3 bucket name for data files (optional, falls back to local files)
- * - COSINE_SIMILARITY_THRESHOLD: Minimum cosine similarity (default: 0.7)
- * - TEXT_SIMILARITY_THRESHOLD: Minimum text similarity (default: 0.6)
+ * - LOCAL_MODE: Set to 'true' or '1' to use local files instead of S3 (default: false)
+ * - KHANA_KYA_BANAU_S3_BUCKET: S3 bucket name for data files (required when LOCAL_MODE=false)
+ * - COSINE_SIMILARITY_THRESHOLD: Minimum cosine similarity (default: 0.2)
+ * - TEXT_SIMILARITY_THRESHOLD: Minimum text similarity (default: 0.2)
  * - MAX_MEALS_PER_BATCH: Maximum meals to process per batch (default: 50)
  */
 
 const { initializeApp } = require('firebase/app');
-const { getFirestore, collection, getDocs, addDoc, serverTimestamp } = require('firebase/firestore');
+const { getFirestore, collection, getDocs, addDoc, setDoc, doc, getDoc, serverTimestamp } = require('firebase/firestore');
 const fs = require('fs');
 const path = require('path');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { detectMealVegetarian, detectImageVegetarian, validateVegetarianConstraint } = require('./vegetarian-detection');
+const { detectMealVegetarian, detectImageNonVegetarian, validateVegetarianConstraint } = require('./vegetarian-detection');
 
 // Initialize AWS S3
 const s3Client = new S3Client();
@@ -58,16 +59,34 @@ const CONFIG = {
   // Firestore collections
   MEALS_COLLECTION: 'mealPlans',
   MAPPINGS_COLLECTION: 'mealImageMappings',
+  FAILED_MAPPINGS_COLLECTION: 'failedImageMappings',
+  
+  // Local mode configuration
+  LOCAL_MODE: process.env.LOCAL_MODE === 'true' || process.env.LOCAL_MODE === '1',
   
   // S3 configuration
   S3_BUCKET: process.env.KHANA_KYA_BANAU_S3_BUCKET,
   S3_EMBEDDINGS_KEY: 'data/image-embeddings.json',
   S3_CUISINES_KEY: 'data/cuisines.json',
   
-  // Local data paths (fallback)
+  // Local data paths (fallback and local mode)
   EMBEDDINGS_PATH: path.join(__dirname, 'data', 'image-embeddings.json'),
   CUISINES_PATH: path.join(__dirname, 'data', 'cuisines.json'),
 };
+
+/**
+ * Sanitize meal name for use as Firestore document ID
+ * Firestore document IDs must be valid UTF-8 strings, no more than 1,500 bytes,
+ * and cannot contain forward slashes, spaces, or control characters
+ */
+function sanitizeMealNameForDocId(mealName) {
+  return mealName
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_') // Replace invalid characters with underscore
+    .replace(/_+/g, '_') // Replace multiple underscores with single underscore
+    .replace(/^_|_$/g, '') // Remove leading/trailing underscores
+    .substring(0, 1500); // Ensure max length (though meal names are unlikely to be this long)
+}
 
 /**
  * Fetch data from S3
@@ -99,14 +118,25 @@ async function fetchFromS3(bucket, key) {
 async function loadCuisineMap() {
   try {
     let cuisinesData;
-    if (CONFIG.S3_BUCKET) {
+    
+    // Check if we're in local mode
+    if (CONFIG.LOCAL_MODE) {
+      console.log('🏠 Local mode enabled - loading cuisines data from local file...');
       try {
-        console.log('📖 Loading cuisines data from S3...');
-        cuisinesData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_CUISINES_KEY);
-      } catch (s3Error) {
-        console.warn('⚠️  Failed to load from S3, falling back to local file:', s3Error.message);
-        cuisinesData = null;
+        cuisinesData = fs.readFileSync(CONFIG.CUISINES_PATH, 'utf8');
+        console.log(`✅ Successfully loaded cuisines from local file (${cuisinesData.length} characters)`);
+      } catch (localError) {
+        console.error('❌ Error loading cuisines from local file:', localError.message);
+        throw new Error('Failed to load cuisines from local file');
       }
+    } else {
+      // Production mode - use S3 only
+      if (!CONFIG.S3_BUCKET) {
+        throw new Error('S3 bucket not configured. Set KHANA_KYA_BANAU_S3_BUCKET environment variable or enable LOCAL_MODE=true');
+      }
+      
+      console.log('📖 Loading cuisines data from S3...');
+      cuisinesData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_CUISINES_KEY);
     }
 
     if (!cuisinesData) {
@@ -128,7 +158,7 @@ async function loadCuisineMap() {
     
   } catch (error) {
     console.error('❌ Error loading cuisines data:', error);
-    return new Map();
+    throw error; // Re-throw to fail fast
   }
 }
 
@@ -143,15 +173,24 @@ async function loadEmbeddings() {
   try {
     let embeddingsData;
     
-    // Try S3 first if bucket is configured
-    if (CONFIG.S3_BUCKET) {
+    // Check if we're in local mode
+    if (CONFIG.LOCAL_MODE) {
+      console.log('🏠 Local mode enabled - loading embeddings from local file...');
       try {
-        console.log('📖 Loading embeddings from S3...');
-        embeddingsData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_EMBEDDINGS_KEY);
-      } catch (s3Error) {
-        console.warn('⚠️  Failed to load from S3, falling back to local file:', s3Error.message);
-        embeddingsData = null;
+        embeddingsData = fs.readFileSync(CONFIG.EMBEDDINGS_PATH, 'utf8');
+        console.log(`✅ Successfully loaded embeddings from local file (${embeddingsData.length} characters)`);
+      } catch (localError) {
+        console.error('❌ Error loading embeddings from local file:', localError.message);
+        throw new Error('Failed to load embeddings from local file');
       }
+    } else {
+      // Production mode - use S3 only
+      if (!CONFIG.S3_BUCKET) {
+        throw new Error('S3 bucket not configured. Set KHANA_KYA_BANAU_S3_BUCKET environment variable or enable LOCAL_MODE=true');
+      }
+      
+      console.log('📖 Loading embeddings from S3...');
+      embeddingsData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_EMBEDDINGS_KEY);
     }
 
     if (!embeddingsData) {
@@ -200,6 +239,22 @@ async function processRequestMeals(mealNames) {
 }
 
 /**
+ * Check if a meal mapping already exists in Firestore
+ */
+async function isMealMappingExists(mealName) {
+  try {
+    const docId = sanitizeMealNameForDocId(mealName);
+    const mappingsCollection = collection(firestore, CONFIG.MAPPINGS_COLLECTION);
+    const docRef = doc(mappingsCollection, docId);
+    const docSnap = await getDoc(docRef);
+    return docSnap.exists();
+  } catch (error) {
+    console.error(`❌ Error checking if meal mapping exists for "${mealName}":`, error);
+    return false; // Assume it doesn't exist if we can't check
+  }
+}
+
+/**
  * Fetch unmapped meals from Firestore
  */
 async function fetchUnmappedMeals() {
@@ -210,21 +265,11 @@ async function fetchUnmappedMeals() {
     const mealsCollection = collection(firestore, CONFIG.MEALS_COLLECTION);
     const mealsSnapshot = await getDocs(mealsCollection);
     
-    // Get existing mappings
-    const mappingsCollection = collection(firestore, CONFIG.MAPPINGS_COLLECTION);
-    const mappingsSnapshot = await getDocs(mappingsCollection);
-    const existingMappings = new Set();
-    
-    mappingsSnapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.mealName) {
-        existingMappings.add(data.mealName);
-      }
-    });
-    
     // Filter out already mapped meals and detect vegetarian status
     const unmappedMeals = [];
-    mealsSnapshot.forEach(doc => {
+    const allMealNames = new Set(); // Track all meal names to avoid duplicates
+    
+    for (const doc of mealsSnapshot.docs) {
       const mealData = doc.data();
       
       console.log('Processing meal data:', doc.id);
@@ -234,9 +279,9 @@ async function fetchUnmappedMeals() {
         const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
         const mealTypes = ['breakfast', 'lunch', 'dinner', 'morningSnack', 'eveningSnack'];
         
-        days.forEach(day => {
+        for (const day of days) {
           if (mealData.meals[day]) {
-            mealTypes.forEach(mealType => {
+            for (const mealType of mealTypes) {
               const mealDataItem = mealData.meals[day][mealType];
               
               // Handle both string and object formats
@@ -247,49 +292,67 @@ async function fetchUnmappedMeals() {
                 mealName = mealDataItem.name;
               } else {
                 // Skip if not a valid meal name
-                return;
+                continue;
               }
               
-              if (mealName && !existingMappings.has(mealName)) {
-                // Detect vegetarian status using the vegetarian detection module
-                const isVegetarian = detectMealVegetarian(mealName, '');
+              if (mealName && !allMealNames.has(mealName)) {
+                allMealNames.add(mealName);
                 
-                unmappedMeals.push({
-                  id: `${doc.id}_${day}_${mealType}`,
-                  name: mealName,
-                  isVegetarian: isVegetarian,
-                  description: `${mealType} for ${day}`,
-                  cuisine: 'Indian', // Default cuisine
-                  day: day,
-                  mealType: mealType,
-                  weekStartDate: mealData.weekStartDate,
-                  userId: mealData.userId,
-                  originalDocId: doc.id
-                });
+                // Check if mapping already exists
+                const mappingExists = await isMealMappingExists(mealName);
                 
-                console.log(`Found unmapped meal: "${mealName}" (${day} ${mealType})`);
+                if (!mappingExists) {
+                  // Detect vegetarian status using the vegetarian detection module
+                  const isVegetarian = detectMealVegetarian(mealName, '');
+                  
+                  unmappedMeals.push({
+                    id: `${doc.id}_${day}_${mealType}`,
+                    name: mealName,
+                    isVegetarian: isVegetarian,
+                    description: `${mealType} for ${day}`,
+                    cuisine: 'Indian', // Default cuisine
+                    day: day,
+                    mealType: mealType,
+                    weekStartDate: mealData.weekStartDate,
+                    userId: mealData.userId,
+                    originalDocId: doc.id
+                  });
+                  
+                  console.log(`Found unmapped meal: "${mealName}" (${day} ${mealType})`);
+                } else {
+                  console.log(`Skipping already mapped meal: "${mealName}"`);
+                }
               }
-            });
+            }
           }
-        });
+        }
       }
       // Handle legacy format with direct name field
-      else if (mealData.name && !existingMappings.has(mealData.name)) {
-        // Detect vegetarian status using the vegetarian detection module
-        const isVegetarian = detectMealVegetarian(mealData.name, mealData.description);
+      else if (mealData.name && !allMealNames.has(mealData.name)) {
+        allMealNames.add(mealData.name);
         
-        unmappedMeals.push({
-          id: doc.id,
-          name: mealData.name,
-          isVegetarian: isVegetarian,
-          description: mealData.description || '',
-          cuisine: mealData.cuisine || '',
-          ...mealData
-        });
+        // Check if mapping already exists
+        const mappingExists = await isMealMappingExists(mealData.name);
         
-        console.log(`Found unmapped meal: "${mealData.name}"`);
+        if (!mappingExists) {
+          // Detect vegetarian status using the vegetarian detection module
+          const isVegetarian = detectMealVegetarian(mealData.name, mealData.description);
+          
+          unmappedMeals.push({
+            id: doc.id,
+            name: mealData.name,
+            isVegetarian: isVegetarian,
+            description: mealData.description || '',
+            cuisine: mealData.cuisine || '',
+            ...mealData
+          });
+          
+          console.log(`Found unmapped meal: "${mealData.name}"`);
+        } else {
+          console.log(`Skipping already mapped meal: "${mealData.name}"`);
+        }
       }
-    });
+    }
     
     console.log(`✅ Found ${unmappedMeals.length} unmapped meals out of ${mealsSnapshot.size} total meals`);
     return unmappedMeals;
@@ -355,53 +418,44 @@ function calculateTextSimilarity(text1, text2) {
 function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbeddings) {
   let bestMatch = null;
   let bestCosineScore = 0;
-  let bestTextScore = 0;
-  let method = 'none';
-  let reason = 'No suitable match found';
+  let success = false;
 
   console.log(`🔍 Finding best match for meal: "${mealName}" (vegetarian: ${mealIsVegetarian})`);
 
+  console.log('imageEmbeddings', imageEmbeddings.length);
+
   for (const imageEmbedding of imageEmbeddings) {
     // Detect vegetarian status for the image if not already set
-    const imageIsVegetarian = imageEmbedding.isVegetarian !== undefined 
-      ? imageEmbedding.isVegetarian 
-      : detectImageVegetarian(imageEmbedding.url, imageEmbedding.name, imageEmbedding.description);
-    
+    const imageIsNonVegetarian = detectImageNonVegetarian(imageEmbedding.url, imageEmbedding.name, imageEmbedding.description);
+
     // Vegetarian fail-safe: never map vegetarian meal to non-vegetarian image
-    if (mealIsVegetarian && !imageIsVegetarian) {
+    if (mealIsVegetarian && imageIsNonVegetarian) {
       continue;
     }
 
     // Calculate cosine similarity
     const cosineScore = calculateCosineSimilarity(mealEmbedding, imageEmbedding.embedding);
     
-    // Calculate text similarity
-    const textScore = calculateTextSimilarity(mealName, imageEmbedding.name || '');
-
     // Determine if this is a better match
-    if (cosineScore >= CONFIG.COSINE_SIMILARITY_THRESHOLD && cosineScore > bestCosineScore) {
+    if (cosineScore >= CONFIG.COSINE_SIMILARITY_THRESHOLD) {
+      success = true;
+    }
+    
+    if(cosineScore > bestCosineScore){
       bestMatch = imageEmbedding;
       bestCosineScore = cosineScore;
-      method = 'cosine';
-      reason = `Cosine similarity ${cosineScore.toFixed(3)} >= ${CONFIG.COSINE_SIMILARITY_THRESHOLD}`;
-    } else if (method !== 'cosine' && textScore >= CONFIG.TEXT_SIMILARITY_THRESHOLD && textScore > bestTextScore) {
-      bestMatch = imageEmbedding;
-      bestTextScore = textScore;
-      method = 'text';
-      reason = `Text similarity ${textScore.toFixed(3)} >= ${CONFIG.TEXT_SIMILARITY_THRESHOLD}`;
     }
   }
 
   const result = {
+    mapped: success,
     bestMatch,
     cosineScore: bestCosineScore,
-    textScore: bestTextScore,
-    method,
-    reason,
-    url: cuisineMap[bestMatch.name].imageUrl
+    url: bestMatch ? cuisineMap[bestMatch.name].imageUrl : null
   };
 
-  console.log(`📊 Match result for "${mealName}": ${method} (cosine: ${bestCosineScore.toFixed(3)}, text: ${bestTextScore.toFixed(3)})`);
+  console.log(`📊 Match result for "${mealName}": (cosine: ${bestCosineScore.toFixed(3)})`);
+  console.log('result', bestMatch);
   
   return result;
 }
@@ -441,6 +495,7 @@ async function generateMealEmbedding(mealName) {
  */
 async function processMealBatch(meals, imageEmbeddings) {
   const results = [];
+  const unmappedResults = []
   
   console.log(`🔄 Processing batch of ${meals.length} meals...`);
 
@@ -449,7 +504,6 @@ async function processMealBatch(meals, imageEmbeddings) {
       // Generate embedding for the meal
       const mealEmbedding = await generateMealEmbedding(meal.name);
 
-      // Find best image match
       const matchResult = findBestImageMatch(
         meal.name,
         mealEmbedding,
@@ -457,60 +511,39 @@ async function processMealBatch(meals, imageEmbeddings) {
         imageEmbeddings
       );
 
-
-      const result = {
-        mealId: meal.id,
-        mealName: meal.name,
-        imageUrl: matchResult.url || null,
-        imageName: matchResult.bestMatch?.name || null,
-        cosineScore: matchResult.cosineScore,
-        textScore: matchResult.textScore,
-        method: matchResult.method,
-        reason: matchResult.reason,
-        mealIsVegetarian: meal.isVegetarian,
-        imageIsVegetarian: matchResult.bestMatch ? 
-          (matchResult.bestMatch.isVegetarian !== undefined 
-            ? matchResult.bestMatch.isVegetarian 
-            : detectImageVegetarian(matchResult.bestMatch.url, matchResult.bestMatch.name, matchResult.bestMatch.description)) 
-          : null,
-        // Additional metadata for weekly meal plans
-        day: meal.day || null,
-        mealType: meal.mealType || null,
-        weekStartDate: meal.weekStartDate || null,
-        userId: meal.userId || null,
-        originalDocId: meal.originalDocId || null,
-        processedAt: new Date().toISOString()
-      };
-
-      results.push(result);
-      
-      // Log successful mapping
-      if (result.imageUrl) {
-        console.log(`✅ Mapped "${meal.name}" -> "${result.imageName}" (${result.method})`);
+      if(matchResult.mapped){
+        const result = {
+          mealName: meal.name,
+          imageUrl: matchResult.url || null,
+          imageName: matchResult.bestMatch?.name || null,
+          cosineScore: matchResult.cosineScore,
+          textScore: matchResult.textScore,
+          mealIsVegetarian: meal.isVegetarian,
+          processedAt: new Date().toISOString()
+        };
+  
+        results.push(result);
       } else {
-        console.log(`⚠️  No suitable image found for "${meal.name}"`);
+        const unMappedResult = {
+          mealName: meal.name,
+          imageUrl: matchResult.url || null,
+          imageName: matchResult.bestMatch?.name || null,
+          cosineScore: matchResult.cosineScore,
+          textScore: matchResult.textScore,
+          mealIsVegetarian: meal.isVegetarian,
+          processedAt: new Date().toISOString()
+        }
+        unmappedResults.push(unMappedResult)
       }
-
     } catch (error) {
       console.error(`❌ Error processing meal "${meal.name}":`, error);
-      results.push({
-        mealId: meal.id,
-        mealName: meal.name,
-        imageUrl: null,
-        method: 'error',
-        error: error.message,
-        // Additional metadata for weekly meal plans
-        day: meal.day || null,
-        mealType: meal.mealType || null,
-        weekStartDate: meal.weekStartDate || null,
-        userId: meal.userId || null,
-        originalDocId: meal.originalDocId || null,
-        processedAt: new Date().toISOString()
-      });
     }
   }
 
-  return results;
+  return {
+    results,
+    unmappedResults
+  }
 }
 
 /**
@@ -524,29 +557,23 @@ async function updateFirestoreMappings(results) {
     let updateCount = 0;
 
     for (const result of results) {
-      if (result.imageUrl && result.method !== 'error') {
-        await addDoc(mappingsCollection, {
-          mealId: result.mealId,
+      if (result.imageUrl) {
+        const docId = sanitizeMealNameForDocId(result.mealName);
+        const docRef = doc(mappingsCollection, docId);
+        
+        await setDoc(docRef, {
           mealName: result.mealName,
           imageUrl: result.imageUrl,
           imageName: result.imageName,
           cosineScore: result.cosineScore,
-          textScore: result.textScore,
-          method: result.method,
-          reason: result.reason,
           mealIsVegetarian: result.mealIsVegetarian,
-          imageIsVegetarian: result.imageIsVegetarian,
           // Additional metadata for weekly meal plans
-          day: result.day || null,
-          mealType: result.mealType || null,
-          weekStartDate: result.weekStartDate || null,
-          userId: result.userId || null,
-          originalDocId: result.originalDocId || null,
           createdAt: serverTimestamp(),
           processedAt: result.processedAt
         });
         
         updateCount++;
+        console.log(`✅ Updated mapping for "${result.mealName}" (doc ID: ${docId})`);
       }
     }
 
@@ -563,15 +590,59 @@ async function updateFirestoreMappings(results) {
 }
 
 /**
+ * Store failed mappings in Firestore
+ */
+async function storeFailedMappings(failedResults) {
+  try {
+    if (failedResults.length === 0) {
+      console.log('ℹ️  No failed mappings to store');
+      return;
+    }
+
+    console.log(`💾 Storing ${failedResults.length} failed mappings in Firestore...`);
+    
+    const failedCollection = collection(firestore, CONFIG.FAILED_MAPPINGS_COLLECTION);
+    let storeCount = 0;
+
+    for (const result of failedResults) {
+      // Use mealName as document ID for failed mappings too, with a prefix to distinguish from successful mappings
+      const docId = `${sanitizeMealNameForDocId(result.mealName)}`;
+      const docRef = doc(failedCollection, docId);
+      
+      await setDoc(docRef, {
+        mealName: result.mealName,
+        mealIsVegetarian: result.mealIsVegetarian,
+        cosineScore: result.cosineScore,
+        imageUrl: result.imageUrl,
+        imageName: result.imageName,
+        createdAt: serverTimestamp(),
+        processedAt: result.processedAt
+      });
+      
+      storeCount++;
+      console.log(`✅ Stored failed mapping for "${result.mealName}" (doc ID: ${docId})`);
+    }
+
+    console.log(`✅ Successfully stored ${storeCount} failed mappings in Firestore`);
+    
+  } catch (error) {
+    console.error('❌ Error storing failed mappings:', error);
+    throw error;
+  }
+}
+
+/**
  * Main Lambda handler
  */
 exports.handler = async (event, context) => {
   console.log('🚀 Starting meal-image mapping Lambda function');
   console.log('📋 Configuration:', {
+    localMode: CONFIG.LOCAL_MODE,
     cosineThreshold: CONFIG.COSINE_SIMILARITY_THRESHOLD,
     textThreshold: CONFIG.TEXT_SIMILARITY_THRESHOLD,
     maxBatchSize: CONFIG.MAX_MEALS_PER_BATCH,
-    maxExecutionTime: CONFIG.MAX_EXECUTION_TIME_MS
+    maxExecutionTime: CONFIG.MAX_EXECUTION_TIME_MS,
+    s3Bucket: CONFIG.S3_BUCKET || 'Not configured'
   });
   
   const startTime = Date.now();
@@ -641,28 +712,34 @@ exports.handler = async (event, context) => {
       const totalBatches = Math.ceil(mealsToProcess.length / batchSize);
       
       console.log(`🔄 Processing batch ${batchNumber}/${totalBatches} (${batch.length} meals)`);
-      console.log('imageEmbeddings', imageEmbeddings.length);
-      console.log('cuisineMap length', Object.entries(cuisineMap).length);
+      
       const batchResults = await processMealBatch(batch, imageEmbeddings);
-      allResults.push(...batchResults);
+      allResults.push(...batchResults.results);
       processedCount += batch.length;
       
       // Update Firestore after each batch to avoid losing progress
-      await updateFirestoreMappings(batchResults);
+      await updateFirestoreMappings(batchResults.results);
+      
+      // Store failed mappings (where bestMatch is null)
+      if (batchResults.unmappedResults.length > 0) {
+        await storeFailedMappings(batchResults.unmappedResults);
+      }
     }
     
     const executionTime = Date.now() - startTime;
-    const successfulMappings = allResults.filter(r => r.imageUrl && r.method !== 'error').length;
+    // const successfulMappings = batchResults.results.length;
+    // const failedMappings = batchResults.unmappedResults.length;
     
     console.log(`✅ Processing completed in ${executionTime}ms`);
-    console.log(`📊 Results: ${successfulMappings}/${processedCount} meals successfully mapped`);
+    // console.log(`📊 Results: ${successfulMappings}/${processedCount} meals successfully mapped, ${failedMappings} failed mappings stored`);
     
     // Format response based on mode
     const response = {
       message: 'Meal-image mapping completed',
       mode,
       processedCount,
-      successfulMappings,
+      // successfulMappings,
+      // failedMappings,
       executionTimeMs: executionTime,
       results: allResults
     };
