@@ -68,7 +68,7 @@ const NON_VEGETARIAN_INDICATORS = [
   
   // Fish and seafood
   'fish', 'salmon', 'tuna', 'prawn', 'shrimp', 'crab', 'lobster', 'oyster',
-  'mussel', 'clam', 'squid', 'octopus', 'seafood', 'marine', 'sea food',
+  'mussel', 'clam', 'squid', 'octopus', 'seafood', 'marine', 'sea food', 'machi',
   
   // Eggs
   'egg', 'eggs', 'omelette', 'scrambled', 'boiled egg', 'fried egg',
@@ -190,49 +190,37 @@ function detectMealVegetarian(mealName, description) {
 }
 
 /**
- * Detect if an image is vegetarian based on filename and description
+ * Detect if an image is non-vegetarian based on filename and description
+ * Returns true if ANY hint of non-vegetarian content is found (less forgiving)
  */
-function detectImageVegetarian(imageUrl, imageName, description) {
-  if (!imageUrl) return true; // Default to vegetarian if uncertain
+function detectImageNonVegetarian(imageUrl, imageName, description) {
+  console.log('imageUrl', imageUrl);
+  console.log('imageName', imageName);
+  console.log('description', description);
+  if (!imageUrl) return false; // Default to vegetarian (non-veg = false) if uncertain
   
   const text = `${imageUrl} ${imageName || ''} ${description || ''}`.toLowerCase();
+  console.log('text', text);
   
-  // Check for strong indicators first
+  // Check for strong non-vegetarian indicators first - any match means non-veg
   for (const indicator of STRONG_NON_VEGETARIAN_INDICATORS) {
     if (text.includes(indicator)) {
-      return false;
-    }
-  }
-  
-  for (const indicator of STRONG_VEGETARIAN_INDICATORS) {
-    if (text.includes(indicator)) {
+      console.log(`Strong non-veg indicator found: ${indicator}`);
       return true;
     }
   }
   
-  // Count vegetarian vs non-vegetarian indicators
-  let vegetarianScore = 0;
-  let nonVegetarianScore = 0;
-  
-  for (const indicator of VEGETARIAN_INDICATORS) {
-    if (text.includes(indicator)) {
-      vegetarianScore++;
-    }
-  }
-  
+  // Check for any non-vegetarian indicators - any match means non-veg
   for (const indicator of NON_VEGETARIAN_INDICATORS) {
     if (text.includes(indicator)) {
-      nonVegetarianScore++;
+      console.log(`Non-veg indicator found: ${indicator}`);
+      return true;
     }
   }
   
-  // If no indicators found, default to vegetarian (safer choice)
-  if (vegetarianScore === 0 && nonVegetarianScore === 0) {
-    return true;
-  }
-  
-  // Return vegetarian if vegetarian score is higher or equal
-  return vegetarianScore >= nonVegetarianScore;
+  // If no non-vegetarian indicators found, assume vegetarian (return false)
+  console.log('No non-vegetarian indicators found, assuming vegetarian');
+  return false;
 }
 
 /**
@@ -246,7 +234,8 @@ function validateVegetarianConstraint(
   imageDescription
 ) {
   const mealIsVegetarian = detectMealVegetarian(mealName, mealDescription);
-  const imageIsVegetarian = detectImageVegetarian(imageUrl, imageName, imageDescription);
+  const imageIsNonVegetarian = detectImageNonVegetarian(imageUrl, imageName, imageDescription);
+  const imageIsVegetarian = !imageIsNonVegetarian; // Convert to vegetarian boolean
   
   // Vegetarian meal can only be mapped to vegetarian image
   // Non-vegetarian meal can be mapped to any image
@@ -282,11 +271,12 @@ function filterImagesByVegetarianConstraint(
   const mealIsVegetarian = detectMealVegetarian(mealName, mealDescription);
   
   return images.map(image => {
-    const detectedVegetarian = detectImageVegetarian(
+    const detectedNonVegetarian = detectImageNonVegetarian(
       image.url,
       image.name,
       image.description
     );
+    const detectedVegetarian = !detectedNonVegetarian; // Convert to vegetarian boolean
     
     // Use detected vegetarian status if not explicitly set
     const isVegetarian = image.isVegetarian !== undefined ? image.isVegetarian : detectedVegetarian;
@@ -348,7 +338,8 @@ function getVegetarianConfidence(text, isVegetarian) {
 
 module.exports = {
   detectMealVegetarian,
-  detectImageVegetarian,
+  detectImageVegetarian, // Keep for backward compatibility
+  detectImageNonVegetarian,
   validateVegetarianConstraint,
   filterImagesByVegetarianConstraint,
   getVegetarianConfidence

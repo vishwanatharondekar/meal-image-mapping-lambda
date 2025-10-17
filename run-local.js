@@ -35,14 +35,7 @@ const mockEvent = {
 const mockRequestEvent = {
   body: JSON.stringify({
     mealNames: [
-      'Poha',
-      'Chicken Biryani',
-      'Dal Makhani',
-      'Butter Chicken',
-      'Palak Paneer',
-      'Chicken Curry',
-      'Rajma Chawal',
-      'Fish Curry'
+      'Veg Pulao with Raita',
       // Add your custom meal names here for testing
     ]
   })
