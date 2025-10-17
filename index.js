@@ -12,9 +12,10 @@
  * Environment Variables Required:
  * - FIREBASE_PROJECT_ID: Firebase project ID
  * - OPENAI_API_KEY: OpenAI API key for generating embeddings
- * - KHANA_KYA_BANAU_S3_BUCKET: S3 bucket name for data files (optional, falls back to local files)
- * - COSINE_SIMILARITY_THRESHOLD: Minimum cosine similarity (default: 0.7)
- * - TEXT_SIMILARITY_THRESHOLD: Minimum text similarity (default: 0.6)
+ * - LOCAL_MODE: Set to 'true' or '1' to use local files instead of S3 (default: false)
+ * - KHANA_KYA_BANAU_S3_BUCKET: S3 bucket name for data files (required when LOCAL_MODE=false)
+ * - COSINE_SIMILARITY_THRESHOLD: Minimum cosine similarity (default: 0.2)
+ * - TEXT_SIMILARITY_THRESHOLD: Minimum text similarity (default: 0.2)
  * - MAX_MEALS_PER_BATCH: Maximum meals to process per batch (default: 50)
  */
 
@@ -60,12 +61,15 @@ const CONFIG = {
   MAPPINGS_COLLECTION: 'mealImageMappings',
   FAILED_MAPPINGS_COLLECTION: 'failedImageMappings',
   
+  // Local mode configuration
+  LOCAL_MODE: process.env.LOCAL_MODE === 'true' || process.env.LOCAL_MODE === '1',
+  
   // S3 configuration
   S3_BUCKET: process.env.KHANA_KYA_BANAU_S3_BUCKET,
   S3_EMBEDDINGS_KEY: 'data/image-embeddings.json',
   S3_CUISINES_KEY: 'data/cuisines.json',
   
-  // Local data paths (fallback)
+  // Local data paths (fallback and local mode)
   EMBEDDINGS_PATH: path.join(__dirname, 'data', 'image-embeddings.json'),
   CUISINES_PATH: path.join(__dirname, 'data', 'cuisines.json'),
 };
@@ -100,14 +104,25 @@ async function fetchFromS3(bucket, key) {
 async function loadCuisineMap() {
   try {
     let cuisinesData;
-    if (CONFIG.S3_BUCKET) {
+    
+    // Check if we're in local mode
+    if (CONFIG.LOCAL_MODE) {
+      console.log('🏠 Local mode enabled - loading cuisines data from local file...');
       try {
-        console.log('📖 Loading cuisines data from S3...');
-        cuisinesData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_CUISINES_KEY);
-      } catch (s3Error) {
-        console.warn('⚠️  Failed to load from S3, falling back to local file:', s3Error.message);
-        cuisinesData = null;
+        cuisinesData = fs.readFileSync(CONFIG.CUISINES_PATH, 'utf8');
+        console.log(`✅ Successfully loaded cuisines from local file (${cuisinesData.length} characters)`);
+      } catch (localError) {
+        console.error('❌ Error loading cuisines from local file:', localError.message);
+        throw new Error('Failed to load cuisines from local file');
       }
+    } else {
+      // Production mode - use S3 only
+      if (!CONFIG.S3_BUCKET) {
+        throw new Error('S3 bucket not configured. Set KHANA_KYA_BANAU_S3_BUCKET environment variable or enable LOCAL_MODE=true');
+      }
+      
+      console.log('📖 Loading cuisines data from S3...');
+      cuisinesData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_CUISINES_KEY);
     }
 
     if (!cuisinesData) {
@@ -129,7 +144,7 @@ async function loadCuisineMap() {
     
   } catch (error) {
     console.error('❌ Error loading cuisines data:', error);
-    return new Map();
+    throw error; // Re-throw to fail fast
   }
 }
 
@@ -144,15 +159,24 @@ async function loadEmbeddings() {
   try {
     let embeddingsData;
     
-    // Try S3 first if bucket is configured
-    if (CONFIG.S3_BUCKET) {
+    // Check if we're in local mode
+    if (CONFIG.LOCAL_MODE) {
+      console.log('🏠 Local mode enabled - loading embeddings from local file...');
       try {
-        console.log('📖 Loading embeddings from S3...');
-        embeddingsData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_EMBEDDINGS_KEY);
-      } catch (s3Error) {
-        console.warn('⚠️  Failed to load from S3, falling back to local file:', s3Error.message);
-        embeddingsData = null;
+        embeddingsData = fs.readFileSync(CONFIG.EMBEDDINGS_PATH, 'utf8');
+        console.log(`✅ Successfully loaded embeddings from local file (${embeddingsData.length} characters)`);
+      } catch (localError) {
+        console.error('❌ Error loading embeddings from local file:', localError.message);
+        throw new Error('Failed to load embeddings from local file');
       }
+    } else {
+      // Production mode - use S3 only
+      if (!CONFIG.S3_BUCKET) {
+        throw new Error('S3 bucket not configured. Set KHANA_KYA_BANAU_S3_BUCKET environment variable or enable LOCAL_MODE=true');
+      }
+      
+      console.log('📖 Loading embeddings from S3...');
+      embeddingsData = await fetchFromS3(CONFIG.S3_BUCKET, CONFIG.S3_EMBEDDINGS_KEY);
     }
 
     if (!embeddingsData) {
@@ -359,23 +383,19 @@ function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbe
 
   console.log(`🔍 Finding best match for meal: "${mealName}" (vegetarian: ${mealIsVegetarian})`);
 
+  console.log('imageEmbeddings', imageEmbeddings.length);
+
   for (const imageEmbedding of imageEmbeddings) {
     // Detect vegetarian status for the image if not already set
     const imageIsNonVegetarian = detectImageNonVegetarian(imageEmbedding.url, imageEmbedding.name, imageEmbedding.description);
-    const imageIsVegetarian = imageEmbedding.isVegetarian !== undefined 
-      ? imageEmbedding.isVegetarian 
-      : !imageIsNonVegetarian;
-    
+
     // Vegetarian fail-safe: never map vegetarian meal to non-vegetarian image
-    if (mealIsVegetarian && !imageIsVegetarian) {
+    if (mealIsVegetarian && imageIsNonVegetarian) {
       continue;
     }
 
     // Calculate cosine similarity
     const cosineScore = calculateCosineSimilarity(mealEmbedding, imageEmbedding.embedding);
-    
-    // Calculate text similarity
-    const textScore = calculateTextSimilarity(mealName, imageEmbedding.name || '');
     
     // Determine if this is a better match
     if (cosineScore >= CONFIG.COSINE_SIMILARITY_THRESHOLD && cosineScore > bestCosineScore) {
@@ -395,11 +415,7 @@ function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbe
   };
 
   console.log(`📊 Match result for "${mealName}": (cosine: ${bestCosineScore.toFixed(3)})`);
-  console.log('result', bestMatch.name);
-  console.log('result', bestMatch.url);
-  console.log('result', bestMatch.embedding);
-  console.log('result', bestMatch.isVegetarian);
-  console.log('result', bestMatch.description);
+  console.log('result', bestMatch);
   
   return result;
 }
@@ -580,10 +596,12 @@ async function storeFailedMappings(failedResults) {
 exports.handler = async (event, context) => {
   console.log('🚀 Starting meal-image mapping Lambda function');
   console.log('📋 Configuration:', {
+    localMode: CONFIG.LOCAL_MODE,
     cosineThreshold: CONFIG.COSINE_SIMILARITY_THRESHOLD,
     textThreshold: CONFIG.TEXT_SIMILARITY_THRESHOLD,
     maxBatchSize: CONFIG.MAX_MEALS_PER_BATCH,
-    maxExecutionTime: CONFIG.MAX_EXECUTION_TIME_MS
+    maxExecutionTime: CONFIG.MAX_EXECUTION_TIME_MS,
+    s3Bucket: CONFIG.S3_BUCKET || 'Not configured'
   });
   
   const startTime = Date.now();

@@ -194,10 +194,6 @@ function detectMealVegetarian(mealName, description) {
  * Returns true if ANY hint of non-vegetarian content is found (less forgiving)
  */
 function detectImageNonVegetarian(imageUrl, imageName, description) {
-  console.log('imageUrl', imageUrl);
-  console.log('imageName', imageName);
-  console.log('description', description);
-  if (!imageUrl) return false; // Default to vegetarian (non-veg = false) if uncertain
   
   const text = `${imageUrl} ${imageName || ''} ${description || ''}`.toLowerCase();
   console.log('text', text);
@@ -338,7 +334,6 @@ function getVegetarianConfidence(text, isVegetarian) {
 
 module.exports = {
   detectMealVegetarian,
-  detectImageVegetarian, // Keep for backward compatibility
   detectImageNonVegetarian,
   validateVegetarianConstraint,
   filterImagesByVegetarianConstraint,

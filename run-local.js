@@ -35,7 +35,7 @@ const mockEvent = {
 const mockRequestEvent = {
   body: JSON.stringify({
     mealNames: [
-      'Veg Pulao with Raita',
+      'Patra',
       // Add your custom meal names here for testing
     ]
   })
@@ -261,9 +261,15 @@ FIREBASE_PROJECT_ID=your-firebase-project-id
 # OpenAI Configuration
 OPENAI_API_KEY=sk-your-openai-api-key
 
+# Local Mode Configuration
+LOCAL_MODE=true
+
+# S3 Configuration (required when LOCAL_MODE=false)
+KHANA_KYA_BANAU_S3_BUCKET=your-s3-bucket-name
+
 # Optional Configuration (with defaults)
-COSINE_SIMILARITY_THRESHOLD=0.7
-TEXT_SIMILARITY_THRESHOLD=0.6
+COSINE_SIMILARITY_THRESHOLD=0.2
+TEXT_SIMILARITY_THRESHOLD=0.2
 MAX_MEALS_PER_BATCH=50
 AWS_REGION=us-east-1
 
