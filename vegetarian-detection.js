@@ -140,7 +140,7 @@ const STRONG_VEGETARIAN_INDICATORS = [
 
 const STRONG_NON_VEGETARIAN_INDICATORS = [
   'non-vegetarian', 'non veg', 'nonveg', 'nonvegetarian', 'meat',
-  'chicken', 'mutton', 'fish', 'prawn', 'egg', 'seafood', 'maas'
+  'chicken', 'mutton', 'fish', 'prawn', 'egg', 'seafood', 'maas', ' anda '
 ];
 
 /**
@@ -196,12 +196,10 @@ function detectMealVegetarian(mealName, description) {
 function detectImageNonVegetarian(imageUrl, imageName, description) {
   
   const text = `${imageUrl} ${imageName || ''} ${description || ''}`.toLowerCase();
-  console.log('text', text);
-  
   // Check for strong non-vegetarian indicators first - any match means non-veg
   for (const indicator of STRONG_NON_VEGETARIAN_INDICATORS) {
     if (text.includes(indicator)) {
-      console.log(`Strong non-veg indicator found: ${indicator}`);
+      // console.log(`Strong non-veg indicator found: ${indicator}`);
       return true;
     }
   }
@@ -209,13 +207,13 @@ function detectImageNonVegetarian(imageUrl, imageName, description) {
   // Check for any non-vegetarian indicators - any match means non-veg
   for (const indicator of NON_VEGETARIAN_INDICATORS) {
     if (text.includes(indicator)) {
-      console.log(`Non-veg indicator found: ${indicator}`);
+      // console.log(`Non-veg indicator found: ${indicator}`);
       return true;
     }
   }
   
   // If no non-vegetarian indicators found, assume vegetarian (return false)
-  console.log('No non-vegetarian indicators found, assuming vegetarian');
+  console.log('No non-vegetarian indicators found, assuming vegetarian', text);
   return false;
 }
 

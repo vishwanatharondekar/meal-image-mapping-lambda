@@ -20,7 +20,7 @@
  */
 
 const { initializeApp } = require('firebase/app');
-const { getFirestore, collection, getDocs, addDoc, setDoc, doc, getDoc, serverTimestamp } = require('firebase/firestore');
+const { getFirestore, collection, getDocs, addDoc, setDoc, doc, getDoc, serverTimestamp, query, where, orderBy } = require('firebase/firestore');
 const fs = require('fs');
 const path = require('path');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -199,8 +199,18 @@ async function loadEmbeddings() {
     
     const embeddings = JSON.parse(embeddingsData);
     
-    console.log(`✅ Loaded ${embeddings.length} image embeddings`);
-    return embeddings;
+    // Pre-compute vegetarian status for each image embedding
+    console.log('🥬 Pre-computing vegetarian status for all image embeddings...');
+    const embeddingsWithVegetarianStatus = embeddings.map(embedding => {
+      const imageIsNonVegetarian = detectImageNonVegetarian(embedding.url, embedding.name, embedding.description);
+      return {
+        ...embedding,
+        isNonVegetarian: imageIsNonVegetarian
+      };
+    });
+    
+    console.log(`✅ Loaded ${embeddingsWithVegetarianStatus.length} image embeddings with pre-computed vegetarian status`);
+    return embeddingsWithVegetarianStatus;
     
   } catch (error) {
     console.error('❌ Error loading embeddings:', error);
@@ -255,19 +265,84 @@ async function isMealMappingExists(mealName) {
 }
 
 /**
- * Fetch unmapped meals from Firestore
+ * Fetch existing meal mappings for specific meal names using Firestore 'in' operator
+ * Returns a Set of meal names that already have mappings
+ * @param {string[]} mealNames - Array of meal names to check for existing mappings
+ */
+async function fetchExistingMappings(mealNames) {
+  try {
+    if (!mealNames || mealNames.length === 0) {
+      console.log('ℹ️  No meal names provided, returning empty mappings set');
+      return new Set();
+    }
+
+    console.log(`🔍 Fetching existing mappings for ${mealNames.length} specific meals...`);
+    
+    const mappingsCollection = collection(firestore, CONFIG.MAPPINGS_COLLECTION);
+    const existingMappings = new Set();
+    
+    // Firestore 'in' operator has a limit of 10 items per query
+    // So we need to chunk the meal names into groups of 10
+    const chunks = [];
+    for (let i = 0; i < mealNames.length; i += 10) {
+      chunks.push(mealNames.slice(i, i + 10));
+    }
+    
+    console.log(`📦 Processing ${chunks.length} chunks of meal names (max 10 per chunk)`);
+    
+    // Process each chunk
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      console.log(`🔄 Processing chunk ${i + 1}/${chunks.length} with ${chunk.length} meals`);
+      
+      const query = query(mappingsCollection, where('mealName', 'in', chunk));
+      const snapshot = await getDocs(query);
+      
+      for (const doc of snapshot.docs) {
+        const mappingData = doc.data();
+        if (mappingData.mealName) {
+          existingMappings.add(mappingData.mealName);
+        }
+      }
+    }
+    
+    console.log(`✅ Found ${existingMappings.size} existing mappings out of ${mealNames.length} checked meals`);
+    return existingMappings;
+    
+  } catch (error) {
+    console.error('❌ Error fetching existing mappings:', error);
+    return new Set(); // Return empty set if we can't fetch
+  }
+}
+
+/**
+ * Fetch unmapped meals from Firestore (last two weeks only)
  */
 async function fetchUnmappedMeals() {
   try {
-    console.log('🔍 Fetching unmapped meals from Firestore...');
+    console.log('🔍 Fetching unmapped meals from Firestore (last two weeks)...');
     
-    // Get all meals
+    // Calculate date from two weeks ago
+    const twoWeeksAgo = new Date();
+    twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+    const twoWeeksAgoString = twoWeeksAgo.toISOString().split('T')[0]; // Format as YYYY-MM-DD
+    
+    console.log(`📅 Filtering meal plans from ${twoWeeksAgoString} onwards`);
+    
+    // Get meals from the last two weeks only
     const mealsCollection = collection(firestore, CONFIG.MEALS_COLLECTION);
-    const mealsSnapshot = await getDocs(mealsCollection);
+    const mealsQuery = query(
+      mealsCollection,
+      where('weekStartDate', '>=', twoWeeksAgoString),
+      orderBy('weekStartDate', 'desc')
+    );
+    const mealsSnapshot = await getDocs(mealsQuery);
     
-    // Filter out already mapped meals and detect vegetarian status
-    const unmappedMeals = [];
+    // First pass: collect all unique meal names
     const allMealNames = new Set(); // Track all meal names to avoid duplicates
+    const mealDataList = []; // Store meal data for processing
+    
+    console.log('📋 First pass: collecting all unique meal names...');
     
     for (const doc of mealsSnapshot.docs) {
       const mealData = doc.data();
@@ -298,30 +373,18 @@ async function fetchUnmappedMeals() {
               if (mealName && !allMealNames.has(mealName)) {
                 allMealNames.add(mealName);
                 
-                // Check if mapping already exists
-                const mappingExists = await isMealMappingExists(mealName);
-                
-                if (!mappingExists) {
-                  // Detect vegetarian status using the vegetarian detection module
-                  const isVegetarian = detectMealVegetarian(mealName, '');
-                  
-                  unmappedMeals.push({
-                    id: `${doc.id}_${day}_${mealType}`,
-                    name: mealName,
-                    isVegetarian: isVegetarian,
-                    description: `${mealType} for ${day}`,
-                    cuisine: 'Indian', // Default cuisine
-                    day: day,
-                    mealType: mealType,
-                    weekStartDate: mealData.weekStartDate,
-                    userId: mealData.userId,
-                    originalDocId: doc.id
-                  });
-                  
-                  console.log(`Found unmapped meal: "${mealName}" (${day} ${mealType})`);
-                } else {
-                  console.log(`Skipping already mapped meal: "${mealName}"`);
-                }
+                // Store meal data for later processing
+                mealDataList.push({
+                  id: `${doc.id}_${day}_${mealType}`,
+                  name: mealName,
+                  description: `${mealType} for ${day}`,
+                  cuisine: 'Indian', // Default cuisine
+                  day: day,
+                  mealType: mealType,
+                  weekStartDate: mealData.weekStartDate,
+                  userId: mealData.userId,
+                  originalDocId: doc.id
+                });
               }
             }
           }
@@ -331,30 +394,46 @@ async function fetchUnmappedMeals() {
       else if (mealData.name && !allMealNames.has(mealData.name)) {
         allMealNames.add(mealData.name);
         
-        // Check if mapping already exists
-        const mappingExists = await isMealMappingExists(mealData.name);
-        
-        if (!mappingExists) {
-          // Detect vegetarian status using the vegetarian detection module
-          const isVegetarian = detectMealVegetarian(mealData.name, mealData.description);
-          
-          unmappedMeals.push({
-            id: doc.id,
-            name: mealData.name,
-            isVegetarian: isVegetarian,
-            description: mealData.description || '',
-            cuisine: mealData.cuisine || '',
-            ...mealData
-          });
-          
-          console.log(`Found unmapped meal: "${mealData.name}"`);
-        } else {
-          console.log(`Skipping already mapped meal: "${mealData.name}"`);
-        }
+        // Store meal data for later processing
+        mealDataList.push({
+          id: doc.id,
+          name: mealData.name,
+          description: mealData.description || '',
+          cuisine: mealData.cuisine || '',
+          ...mealData
+        });
       }
     }
     
-    console.log(`✅ Found ${unmappedMeals.length} unmapped meals out of ${mealsSnapshot.size} total meals`);
+    console.log(`📊 Collected ${allMealNames.size} unique meal names from ${mealsSnapshot.size} meal plans`);
+    
+    // Second pass: fetch existing mappings for only the meals we found
+    const existingMappings = await fetchExistingMappings(Array.from(allMealNames));
+    
+    // Third pass: filter out already mapped meals and build final list
+    const unmappedMeals = [];
+    console.log('🔍 Second pass: filtering out already mapped meals...');
+    
+    for (const mealData of mealDataList) {
+      // Check if mapping already exists (using in-memory set)
+      const mappingExists = existingMappings.has(mealData.name);
+      
+      if (!mappingExists) {
+        // Detect vegetarian status using the vegetarian detection module
+        const isVegetarian = detectMealVegetarian(mealData.name, mealData.description || '');
+        
+        unmappedMeals.push({
+          ...mealData,
+          isVegetarian: isVegetarian
+        });
+        
+        console.log(`Found unmapped meal: "${mealData.name}"`);
+      } else {
+        console.log(`Skipping already mapped meal: "${mealData.name}"`);
+      }
+    }
+    
+    console.log(`✅ Found ${unmappedMeals.length} unmapped meals out of ${mealsSnapshot.size} total meals from the last two weeks`);
     return unmappedMeals;
     
   } catch (error) {
@@ -422,11 +501,9 @@ function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbe
 
   console.log(`🔍 Finding best match for meal: "${mealName}" (vegetarian: ${mealIsVegetarian})`);
 
-  console.log('imageEmbeddings', imageEmbeddings.length);
-
   for (const imageEmbedding of imageEmbeddings) {
-    // Detect vegetarian status for the image if not already set
-    const imageIsNonVegetarian = detectImageNonVegetarian(imageEmbedding.url, imageEmbedding.name, imageEmbedding.description);
+    // Use pre-computed vegetarian status
+    const imageIsNonVegetarian = imageEmbedding.isNonVegetarian;
 
     // Vegetarian fail-safe: never map vegetarian meal to non-vegetarian image
     if (mealIsVegetarian && imageIsNonVegetarian) {
@@ -455,7 +532,7 @@ function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbe
   };
 
   console.log(`📊 Match result for "${mealName}": (cosine: ${bestCosineScore.toFixed(3)})`);
-  console.log('result', bestMatch);
+  console.log('URL', result.url, '\n');  
   
   return result;
 }
