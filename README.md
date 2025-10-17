@@ -85,6 +85,7 @@ export AWS_REGION="us-east-1"             # Default: us-east-1
 1. Go to Firebase Console → Project Settings
 2. Copy your Project ID
 3. Ensure your Firestore database has the required collections: `meals` and `mealImageMappings`
+   - Note: `mealImageMappings` documents use meal names as document IDs to ensure uniqueness
 
 ## Installation
 

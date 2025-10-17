@@ -20,7 +20,7 @@
  */
 
 const { initializeApp } = require('firebase/app');
-const { getFirestore, collection, getDocs, addDoc, serverTimestamp } = require('firebase/firestore');
+const { getFirestore, collection, getDocs, addDoc, setDoc, doc, getDoc, serverTimestamp } = require('firebase/firestore');
 const fs = require('fs');
 const path = require('path');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -73,6 +73,20 @@ const CONFIG = {
   EMBEDDINGS_PATH: path.join(__dirname, 'data', 'image-embeddings.json'),
   CUISINES_PATH: path.join(__dirname, 'data', 'cuisines.json'),
 };
+
+/**
+ * Sanitize meal name for use as Firestore document ID
+ * Firestore document IDs must be valid UTF-8 strings, no more than 1,500 bytes,
+ * and cannot contain forward slashes, spaces, or control characters
+ */
+function sanitizeMealNameForDocId(mealName) {
+  return mealName
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_') // Replace invalid characters with underscore
+    .replace(/_+/g, '_') // Replace multiple underscores with single underscore
+    .replace(/^_|_$/g, '') // Remove leading/trailing underscores
+    .substring(0, 1500); // Ensure max length (though meal names are unlikely to be this long)
+}
 
 /**
  * Fetch data from S3
@@ -225,6 +239,22 @@ async function processRequestMeals(mealNames) {
 }
 
 /**
+ * Check if a meal mapping already exists in Firestore
+ */
+async function isMealMappingExists(mealName) {
+  try {
+    const docId = sanitizeMealNameForDocId(mealName);
+    const mappingsCollection = collection(firestore, CONFIG.MAPPINGS_COLLECTION);
+    const docRef = doc(mappingsCollection, docId);
+    const docSnap = await getDoc(docRef);
+    return docSnap.exists();
+  } catch (error) {
+    console.error(`❌ Error checking if meal mapping exists for "${mealName}":`, error);
+    return false; // Assume it doesn't exist if we can't check
+  }
+}
+
+/**
  * Fetch unmapped meals from Firestore
  */
 async function fetchUnmappedMeals() {
@@ -235,21 +265,11 @@ async function fetchUnmappedMeals() {
     const mealsCollection = collection(firestore, CONFIG.MEALS_COLLECTION);
     const mealsSnapshot = await getDocs(mealsCollection);
     
-    // Get existing mappings
-    const mappingsCollection = collection(firestore, CONFIG.MAPPINGS_COLLECTION);
-    const mappingsSnapshot = await getDocs(mappingsCollection);
-    const existingMappings = new Set();
-    
-    mappingsSnapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.mealName) {
-        existingMappings.add(data.mealName);
-      }
-    });
-    
     // Filter out already mapped meals and detect vegetarian status
     const unmappedMeals = [];
-    mealsSnapshot.forEach(doc => {
+    const allMealNames = new Set(); // Track all meal names to avoid duplicates
+    
+    for (const doc of mealsSnapshot.docs) {
       const mealData = doc.data();
       
       console.log('Processing meal data:', doc.id);
@@ -259,9 +279,9 @@ async function fetchUnmappedMeals() {
         const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
         const mealTypes = ['breakfast', 'lunch', 'dinner', 'morningSnack', 'eveningSnack'];
         
-        days.forEach(day => {
+        for (const day of days) {
           if (mealData.meals[day]) {
-            mealTypes.forEach(mealType => {
+            for (const mealType of mealTypes) {
               const mealDataItem = mealData.meals[day][mealType];
               
               // Handle both string and object formats
@@ -272,49 +292,67 @@ async function fetchUnmappedMeals() {
                 mealName = mealDataItem.name;
               } else {
                 // Skip if not a valid meal name
-                return;
+                continue;
               }
               
-              if (mealName && !existingMappings.has(mealName)) {
-                // Detect vegetarian status using the vegetarian detection module
-                const isVegetarian = detectMealVegetarian(mealName, '');
+              if (mealName && !allMealNames.has(mealName)) {
+                allMealNames.add(mealName);
                 
-                unmappedMeals.push({
-                  id: `${doc.id}_${day}_${mealType}`,
-                  name: mealName,
-                  isVegetarian: isVegetarian,
-                  description: `${mealType} for ${day}`,
-                  cuisine: 'Indian', // Default cuisine
-                  day: day,
-                  mealType: mealType,
-                  weekStartDate: mealData.weekStartDate,
-                  userId: mealData.userId,
-                  originalDocId: doc.id
-                });
+                // Check if mapping already exists
+                const mappingExists = await isMealMappingExists(mealName);
                 
-                console.log(`Found unmapped meal: "${mealName}" (${day} ${mealType})`);
+                if (!mappingExists) {
+                  // Detect vegetarian status using the vegetarian detection module
+                  const isVegetarian = detectMealVegetarian(mealName, '');
+                  
+                  unmappedMeals.push({
+                    id: `${doc.id}_${day}_${mealType}`,
+                    name: mealName,
+                    isVegetarian: isVegetarian,
+                    description: `${mealType} for ${day}`,
+                    cuisine: 'Indian', // Default cuisine
+                    day: day,
+                    mealType: mealType,
+                    weekStartDate: mealData.weekStartDate,
+                    userId: mealData.userId,
+                    originalDocId: doc.id
+                  });
+                  
+                  console.log(`Found unmapped meal: "${mealName}" (${day} ${mealType})`);
+                } else {
+                  console.log(`Skipping already mapped meal: "${mealName}"`);
+                }
               }
-            });
+            }
           }
-        });
+        }
       }
       // Handle legacy format with direct name field
-      else if (mealData.name && !existingMappings.has(mealData.name)) {
-        // Detect vegetarian status using the vegetarian detection module
-        const isVegetarian = detectMealVegetarian(mealData.name, mealData.description);
+      else if (mealData.name && !allMealNames.has(mealData.name)) {
+        allMealNames.add(mealData.name);
         
-        unmappedMeals.push({
-          id: doc.id,
-          name: mealData.name,
-          isVegetarian: isVegetarian,
-          description: mealData.description || '',
-          cuisine: mealData.cuisine || '',
-          ...mealData
-        });
+        // Check if mapping already exists
+        const mappingExists = await isMealMappingExists(mealData.name);
         
-        console.log(`Found unmapped meal: "${mealData.name}"`);
+        if (!mappingExists) {
+          // Detect vegetarian status using the vegetarian detection module
+          const isVegetarian = detectMealVegetarian(mealData.name, mealData.description);
+          
+          unmappedMeals.push({
+            id: doc.id,
+            name: mealData.name,
+            isVegetarian: isVegetarian,
+            description: mealData.description || '',
+            cuisine: mealData.cuisine || '',
+            ...mealData
+          });
+          
+          console.log(`Found unmapped meal: "${mealData.name}"`);
+        } else {
+          console.log(`Skipping already mapped meal: "${mealData.name}"`);
+        }
       }
-    });
+    }
     
     console.log(`✅ Found ${unmappedMeals.length} unmapped meals out of ${mealsSnapshot.size} total meals`);
     return unmappedMeals;
@@ -518,7 +556,10 @@ async function updateFirestoreMappings(results) {
 
     for (const result of results) {
       if (result.imageUrl) {
-        await addDoc(mappingsCollection, {
+        const docId = sanitizeMealNameForDocId(result.mealName);
+        const docRef = doc(mappingsCollection, docId);
+        
+        await setDoc(docRef, {
           mealName: result.mealName,
           imageUrl: result.imageUrl,
           imageName: result.imageName,
@@ -530,6 +571,7 @@ async function updateFirestoreMappings(results) {
         });
         
         updateCount++;
+        console.log(`✅ Updated mapping for "${result.mealName}" (doc ID: ${docId})`);
       }
     }
 
@@ -561,7 +603,11 @@ async function storeFailedMappings(failedResults) {
     let storeCount = 0;
 
     for (const result of failedResults) {
-      await addDoc(failedCollection, {
+      // Use mealName as document ID for failed mappings too, with a prefix to distinguish from successful mappings
+      const docId = `failed_${sanitizeMealNameForDocId(result.mealName)}`;
+      const docRef = doc(failedCollection, docId);
+      
+      await setDoc(docRef, {
         mealId: result.mealId,
         mealName: result.mealName,
         cosineScore: result.cosineScore,
@@ -580,6 +626,7 @@ async function storeFailedMappings(failedResults) {
       });
       
       storeCount++;
+      console.log(`✅ Stored failed mapping for "${result.mealName}" (doc ID: ${docId})`);
     }
 
     console.log(`✅ Successfully stored ${storeCount} failed mappings in Firestore`);
