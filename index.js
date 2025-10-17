@@ -418,6 +418,7 @@ function calculateTextSimilarity(text1, text2) {
 function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbeddings) {
   let bestMatch = null;
   let bestCosineScore = 0;
+  let success = false;
 
   console.log(`🔍 Finding best match for meal: "${mealName}" (vegetarian: ${mealIsVegetarian})`);
 
@@ -436,17 +437,18 @@ function findBestImageMatch(mealName, mealEmbedding, mealIsVegetarian, imageEmbe
     const cosineScore = calculateCosineSimilarity(mealEmbedding, imageEmbedding.embedding);
     
     // Determine if this is a better match
-    if (cosineScore >= CONFIG.COSINE_SIMILARITY_THRESHOLD && cosineScore > bestCosineScore) {
-      bestMatch = imageEmbedding;
+    if (cosineScore >= CONFIG.COSINE_SIMILARITY_THRESHOLD) {
+      success = true;
     }
-
+    
     if(cosineScore > bestCosineScore){
+      bestMatch = imageEmbedding;
       bestCosineScore = cosineScore;
     }
   }
 
   const result = {
-    mapped: !!bestMatch,
+    mapped: success,
     bestMatch,
     cosineScore: bestCosineScore,
     url: bestMatch ? cuisineMap[bestMatch.name].imageUrl : null
@@ -604,23 +606,15 @@ async function storeFailedMappings(failedResults) {
 
     for (const result of failedResults) {
       // Use mealName as document ID for failed mappings too, with a prefix to distinguish from successful mappings
-      const docId = `failed_${sanitizeMealNameForDocId(result.mealName)}`;
+      const docId = `${sanitizeMealNameForDocId(result.mealName)}`;
       const docRef = doc(failedCollection, docId);
       
       await setDoc(docRef, {
-        mealId: result.mealId,
         mealName: result.mealName,
-        cosineScore: result.cosineScore,
-        textScore: result.textScore,
-        method: result.method,
-        reason: result.reason,
         mealIsVegetarian: result.mealIsVegetarian,
-        // Additional metadata for weekly meal plans
-        day: result.day || null,
-        mealType: result.mealType || null,
-        weekStartDate: result.weekStartDate || null,
-        userId: result.userId || null,
-        originalDocId: result.originalDocId || null,
+        cosineScore: result.cosineScore,
+        imageUrl: result.imageUrl,
+        imageName: result.imageName,
         createdAt: serverTimestamp(),
         processedAt: result.processedAt
       });
